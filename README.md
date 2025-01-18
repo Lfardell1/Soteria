@@ -9,7 +9,7 @@
 Soteria is built for individuals who demand:
 
 - **Untraceable Digital Operations**: All actions occur within an in-memory ephemeral filesystem, ensuring no data remains after use.
-- **Secure Networking**: Enforced routing through VPNs & Tor for complete anonymity. - More Features to come in this area
+- **Secure Networking**: Enforced routing through Proxychains (optional) VPNs & Tor + DNSCrypt for complete anonymity. - More Features to come in this area
 - **Real-Time Awareness**: Instant alerts and monitoring to ensure all systems are operating securely.
 
 In a world where privacy is increasingly compromised, Soteria offers a way to take back control.
