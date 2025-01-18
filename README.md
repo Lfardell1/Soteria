@@ -2,7 +2,11 @@
 
 **Soteria** is a tool for those who value their anonymity and seek freedom from the constraints of a tracked digital existence. This tool embodies a programmer’s vision to create a sanctuary for digital privacy and security, enabling users to operate without leaving a trace. Designed with privacy and security at its core, Soteria provides a robust, ephemeral environment for anonymous actions.
 
-Soteria provides a seamless way for individuals on unix machines to enter their computer into a "secure" mode. This is built upon the symbiosis and layering of anononymity tools and encryption while creating and populating an ephemeral file system run through the users RAM and using this environment as a temporary micro-environment that contains most of the basic commands and tools one is used to using along with sandboxed, protected layers to them. Once a session is completed, the environment is removed from RAM and all data "zeroed" removing every trace of actions taken inside. Similar to the amnesia component of TailsOs but as a program written for linux  
+Soteria offers a robust solution for Unix-based systems to transition into a "secure mode" with ease. This tool leverages a sophisticated combination of anonymity frameworks, encryption protocols, and a dynamically created ephemeral file system. The environment operates entirely in the system's RAM, ensuring no data persists beyond the session.
+
+Soteria acts as a self-contained micro-environment, providing users with familiar Unix commands and tools while integrating additional sandboxed layers for enhanced protection. Networking capabilities are seamlessly incorporated, featuring built-in support for privacy-enhancing tools such as Tor and VPNs, enabling secure and anonymous communication. Network traffic is routed through encrypted tunnels, ensuring no identifiable metadata escapes the secure environment.
+
+Every component runs in isolation to minimize vulnerabilities, offering a secure workspace for sensitive tasks. Once the session concludes, the environment is completely erased—data in RAM is zeroed out, and no trace of the session remains. Inspired by the amnesiac capabilities of TailsOS, Soteria brings similar functionality as a lightweight program designed specifically for Linux. It’s the ideal tool for privacy-conscious users who need a temporary, secure workspace without the overhead of a full OS.
 
 ---
 
