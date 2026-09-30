@@ -1,0 +1,37 @@
+{
+  "filesystem": {
+    "tmpfs_size": "2G",
+    "mount_point": "/mnt/secure",
+    "tools_dir": "/usr/local/tools",
+    "populate_paths": ["/bin", "/usr/bin", "/lib", "/lib64", "/usr/lib"]
+  },
+  "monitoring": {
+    "processes": ["openvpn", "tor"],
+    "tmpfs_free_space_min": "100M",
+    "poll_interval_seconds": 2
+  },
+  "vpn": {
+    "enabled": true,
+    "config_file": "/etc/openvpn/client.conf",
+    "interface": "tun0"
+  },
+  "tor": {
+    "enabled": false,
+    "socks_port": 9050,
+    "config_file": ""
+  },
+  "dnscrypt": {
+    "enabled": false,
+    "config_file": "/etc/dnscrypt-proxy/dnscrypt-proxy.toml",
+    "listen_address": "127.0.0.1:53"
+  },
+  "proxychains": {
+    "enabled": false,
+    "config_file": "/etc/proxychains4.conf"
+  },
+  "network": {
+    "check_connectivity": true,
+    "gateway": "1.1.1.1",
+    "kill_switch": true
+  }
+}
