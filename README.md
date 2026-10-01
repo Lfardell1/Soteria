@@ -51,32 +51,37 @@ In a world where privacy is increasingly compromised, Soteria offers a way to ta
 ### **Prerequisites**
 - Linux system with root access.
 - Installed dependencies:
-  - `Go 1.20+`
+  - `Go 1.22+`
   - `rsync`
   - `iptables`
   - `openvpn`
-  - `tor` (optional for anonymity)
+  - `tor` (optional)
+  - `dnscrypt-proxy` (optional)
+  - `proxychains4` (optional)
 
 ### **Installation**
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/soteria.git
-   cd soteria
+   git clone https://github.com/Lfardell1/Soteria.git
+   cd Soteria
    ```
 
-2. Build the project:
-   ```bash
-   go build -o soteria cmd/main.go
-   ```
-
-3. Install dependencies:
+2. Install host dependencies:
    ```bash
    sudo ./scripts/install_dependencies.sh
+   ```
+
+3. Build the project:
+   ```bash
+   make build
+   # or: go build -o soteria ./cmd/soteria
    ```
 
 4. Set up the configuration file:
    ```bash
    cp config/config.example.json config/config.json
+   # Edit config/config.json — point vpn.config_file at your OpenVPN client config
+   # and enable the layers you need (vpn / tor / dnscrypt / proxychains).
    ```
 
 ---
@@ -90,59 +95,83 @@ Soteria uses a JSON configuration file located at `config/config.json`. Below is
   "filesystem": {
     "tmpfs_size": "2G",
     "mount_point": "/mnt/secure",
-    "tools_dir": "/usr/local/tools"
+    "tools_dir": "/usr/local/tools",
+    "populate_paths": ["/bin", "/usr/bin", "/lib", "/lib64", "/usr/lib"]
   },
   "monitoring": {
-    "processes": ["openvpn", "tor", "tor-browser"],
-    "tmpfs_free_space_min": "100M"
+    "processes": ["openvpn", "tor"],
+    "tmpfs_free_space_min": "100M",
+    "poll_interval_seconds": 2
   },
   "vpn": {
+    "enabled": true,
     "config_file": "/etc/openvpn/client.conf",
     "interface": "tun0"
   },
+  "tor": {
+    "enabled": false,
+    "socks_port": 9050
+  },
+  "dnscrypt": {
+    "enabled": false,
+    "config_file": "/etc/dnscrypt-proxy/dnscrypt-proxy.toml"
+  },
+  "proxychains": {
+    "enabled": false,
+    "config_file": "/etc/proxychains4.conf"
+  },
   "network": {
     "check_connectivity": true,
-    "gateway": "8.8.8.8"
+    "gateway": "1.1.1.1",
+    "kill_switch": true
   }
 }
 ```
 
 ### **Key Configuration Options**
 - `filesystem.tmpfs_size`: Size of the temporary filesystem.
+- `filesystem.populate_paths`: Host paths rsynced into the ephemeral workspace.
 - `monitoring.processes`: List of critical processes to monitor.
-- `vpn.config_file`: Path to the VPN configuration file.
-- `network.gateway`: IP address to check for connectivity.
+- `vpn.enabled` / `vpn.config_file`: OpenVPN client bring-up.
+- `tor.enabled` / `dnscrypt.enabled` / `proxychains.enabled`: Optional anonymity layers.
+- `network.kill_switch`: Fail-closed iptables policy (requires VPN and/or Tor).
+- `network.gateway`: IP address used for connectivity checks.
 
 ---
 
 ## **Usage**
 
-1. **Start Secure Mode**:
+1. **Start Secure Mode** (root required):
    ```bash
-   ./soteria
+   sudo ./soteria -config config/config.json
    ```
 
 2. **Quit Secure Mode**:
    - Press `q` in the TUI to safely unmount and clean up the environment.
+   - `Ctrl+C` / `SIGTERM` also trigger ordered teardown.
 
 3. **Monitor Logs**:
-   - Real-time alerts and stats are displayed in the TUI.
+   - Real-time alerts and stats are displayed in the TUI (kept in memory; no host disk log by default).
 
 ---
 
 ## **How It Works**
 
 1. **Ephemeral Environment**:
-   - Soteria mounts a `tmpfs` at `/mnt/secure`.
-   - All tools and files are loaded into this memory-only filesystem.
+   - Soteria mounts a `tmpfs` at `/mnt/secure` (configurable).
+   - Host tool paths from `populate_paths` are rsynced into this memory-only filesystem.
 
 2. **Networking**:
-   - Traffic is routed through the VPN interface (e.g., `tun0`) or Tor.
-   - `iptables` rules enforce that no traffic bypasses secure routes.
+   - An iptables kill-switch is applied first (fail-closed).
+   - Traffic is then routed through the VPN interface (e.g., `tun0`) and/or Tor SOCKS.
+   - Optional DNSCrypt replaces cleartext DNS; Proxychains can wrap individual apps.
 
 3. **Monitoring**:
-   - The system continuously checks process health and network integrity.
-   - Alerts are generated for any security risks or failures.
+   - The system continuously checks process health, tmpfs free space, and network integrity.
+   - Typed alerts (`ProcessDown`, `DiskLow`, `LeakRisk`, `ConnectivityLost`) feed the TUI.
+
+4. **Teardown**:
+   - Pressing `q` stops the TUI, cancels monitors, stops network services, restores iptables, zeroes small files in the tmpfs, and unmounts.
 
 ---
 
