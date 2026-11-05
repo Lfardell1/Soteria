@@ -1,0 +1,73 @@
+name: Manual Runtime Package Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      sbom_url:
+        description: Reviewed public runtime CycloneDX JSON URL (HTTPS, no credentials)
+        required: true
+        type: string
+      sbom_sha256:
+        description: Independently checked SHA256 of that SBOM file
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  scan-runtime-inventory:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Fetch only the selected, hash-checked SBOM
+        env:
+          SBOM_URL: ${{ inputs.sbom_url }}
+          SBOM_SHA256: ${{ inputs.sbom_sha256 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          [[ $SBOM_URL == https://* && $SBOM_URL != *'@'* && $SBOM_URL != *'?'* && $SBOM_URL != *'#'* ]]
+          [[ $SBOM_SHA256 =~ ^[0-9a-f]{64}$ ]]
+          curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --max-redirs 3 --max-time 90 --max-filesize 16777216 "$SBOM_URL" --output runtime.cdx.json
+          printf '%s  runtime.cdx.json\n' "$SBOM_SHA256" | sha256sum --check --strict -
+      - name: Fetch the pinned scanner binary, never a remote shell installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -u)" -ne 0
+          tool_dir="$RUNNER_TEMP/soteria-grype"
+          mkdir "$tool_dir"
+          curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --max-redirs 3 --max-time 90 --max-filesize 134217728 \
+            https://github.com/anchore/grype/releases/download/v0.121.1/grype_0.121.1_linux_amd64.tar.gz --output "$tool_dir/grype.tar.gz"
+          printf '%s  %s\n' bc3ea3f9e6fd56ac781c08c6c5e614271b79f438200757f6932085c19b0a4657 "$tool_dir/grype.tar.gz" | sha256sum --check --strict -
+          tar --extract --gzip --file="$tool_dir/grype.tar.gz" --directory="$tool_dir" --no-same-owner --no-same-permissions grype
+          "$tool_dir/grype" version > grype-version.txt
+      - name: Require a real current vulnerability database
+        env:
+          GRYPE_CHECK_FOR_APP_UPDATE: 'false'
+          GRYPE_DB_VALIDATE_AGE: 'true'
+        run: |
+          set -euo pipefail
+          timeout --kill-after=5s 180s "$RUNNER_TEMP/soteria-grype/grype" db update
+          timeout --kill-after=5s 60s "$RUNNER_TEMP/soteria-grype/grype" db status > grype-db.txt
+      - name: Scan distro packages, not the host or Go module graph
+        env:
+          GRYPE_CHECK_FOR_APP_UPDATE: 'false'
+          GRYPE_DB_VALIDATE_AGE: 'true'
+          GRYPE_DB_AUTO_UPDATE: 'false'
+        run: timeout --kill-after=5s 180s "$RUNNER_TEMP/soteria-grype/grype" sbom:runtime.cdx.json --output json --file runtime-scan.json --fail-on medium
+      - name: Retain evidence for maintainer triage
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runtime-package-scan
+          path: |
+            runtime.cdx.json
+            runtime-scan.json
+            grype-version.txt
+            grype-db.txt
+          if-no-files-found: error
+          retention-days: 14

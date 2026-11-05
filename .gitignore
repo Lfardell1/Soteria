@@ -18,3 +18,14 @@ vendor/
 
 # Netlify / local
 .netlify/
+
+# Developer, runtime-builder, and unsigned release outputs
+/build/
+/dist/
+/coverage.out
+/coverage.html
+/govulncheck.json
+/runtime-scan.json
+/grype-version.txt
+/grype-db.txt
+__pycache__/

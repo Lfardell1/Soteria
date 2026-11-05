@@ -1,0 +1,67 @@
+name: Safe Go Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: safe-go-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  unit-vet-race:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Require unprivileged runner
+        run: test "$(id -u)" -ne 0
+      - name: Download the official Go 1.27.3 archive with a fixed SHA256
+        run: |
+          timeout --kill-after=5s 180s bash scripts/download-go.sh "$RUNNER_TEMP/soteria-go"
+          printf '%s\n' "$RUNNER_TEMP/soteria-go/bin" >> "$GITHUB_PATH"
+      - name: Formatting and shell syntax
+        run: timeout --kill-after=5s 180s make fmt-check script-check helper-test
+      - name: Build the separate CLI, starter, engine, entry, and runtime utility
+        run: timeout --kill-after=5s 180s make build
+      - name: Unit tests (no live mounts, firewall, VPN, or sudo)
+        run: timeout --kill-after=5s 180s make test
+      - name: Vet
+        run: timeout --kill-after=5s 180s make vet
+      - name: Race tests
+        run: timeout --kill-after=5s 180s make race
+
+  go-vulnerabilities:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Download the same checksum-pinned Go toolchain without credentials
+        run: |
+          test "$(id -u)" -ne 0
+          timeout --kill-after=5s 180s bash scripts/download-go.sh "$RUNNER_TEMP/soteria-go"
+          printf '%s\n' "$RUNNER_TEMP/soteria-go/bin" >> "$GITHUB_PATH"
+      - name: Scan Go source with pinned govulncheck
+        run: |
+          test "$(id -u)" -ne 0
+          timeout --kill-after=5s 180s go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -json ./... > govulncheck.json
+      - name: Retain scanner result, including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: go-vulnerability-report
+          path: govulncheck.json
+          if-no-files-found: error
+          retention-days: 14

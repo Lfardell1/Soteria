@@ -1,0 +1,19 @@
+Package: soteria
+Version: @VERSION@
+Architecture: amd64
+Section: utils
+Priority: optional
+Maintainer: Soteria development build <unreleased@soteria.invalid>
+Homepage: https://github.com/Lfardell1/Soteria
+Depends: bubblewrap (>= 0.8.0), systemd (>= 255), dbus, sudo
+Installed-Size: @SIZE@
+X-Soteria-Target: @TARGET@
+X-Soteria-Runtime-Digest: @DIGEST@
+X-Soteria-Source-Commit: @COMMIT@
+X-Soteria-Package-Lock-SHA256: @LOCK@
+Description: experimental disposable Linux terminal workspace
+ Unsigned development package with separate fixed starter/engine and curated
+ immutable distro runtime, including the non-root trusted entry verifier.
+ Requires a supported systemd/cgroup-v2 host and explicit authorization.
+ Not an anonymity system or a hostile-code security boundary. VM validation
+ and release evidence are required before claiming a supported release.

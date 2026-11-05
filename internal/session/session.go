@@ -1,129 +1,143 @@
+//go:build linux
+
+// Package session serializes resource acquisition and cleanup. Stop only
+// cancels the owner; it never tears down resources underneath a running stage.
 package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 
-	"github.com/Lfardell1/Soteria/internal/config"
-	"github.com/Lfardell1/Soteria/internal/filesystem"
-	"github.com/Lfardell1/Soteria/internal/monitor"
-	"github.com/Lfardell1/Soteria/internal/network"
-	"github.com/Lfardell1/Soteria/internal/tui"
+	"github.com/Lfardell1/Soteria/internal/protocol"
 )
 
-// Session owns the full secure-mode lifecycle.
+type Phase string
+
+const (
+	Validating   Phase = "validating"
+	Preparing    Phase = "preparing"
+	NetworkReady Phase = "network-ready"
+	Running      Phase = "running"
+	Exporting    Phase = "exporting"
+	Stopping     Phase = "stopping"
+	Finished     Phase = "finished"
+	Failed       Phase = "failed"
+)
+
+type cleanup struct {
+	name  string
+	close func() error
+}
 type Session struct {
-	cfg config.Config
-	fs  *filesystem.Manager
-	net *network.Stack
-	mon *monitor.Monitor
-
-	mu       sync.Mutex
-	started  bool
-	stopping bool
-	cancel   context.CancelFunc
+	mu        sync.Mutex
+	started   bool
+	stopped   bool
+	cancel    context.CancelFunc
+	done      chan struct{}
+	phase     Phase
+	resources []cleanup
+	result    protocol.Result
 }
 
-// New builds a session from config.
-func New(cfg config.Config) *Session {
-	fs := filesystem.New(cfg.Filesystem)
-	netStack := network.New(cfg)
-	mon := monitor.New(cfg, fs, netStack, 64)
-	return &Session{cfg: cfg, fs: fs, net: netStack, mon: mon}
-}
+func New() *Session { return &Session{done: make(chan struct{}), phase: Validating} }
 
-// Start brings up filesystem, network, monitoring, and the TUI.
-func (s *Session) Start() error {
+func (s *Session) Phase() Phase { s.mu.Lock(); defer s.mu.Unlock(); return s.phase }
+
+func (s *Session) Advance(ctx context.Context, phase Phase) error {
 	s.mu.Lock()
-	if s.started {
+	defer s.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.stopped {
+		return context.Canceled
+	}
+	allowed := map[Phase]Phase{Validating: Preparing, Preparing: NetworkReady, NetworkReady: Running, Running: Exporting}
+	if allowed[s.phase] != phase {
+		return fmt.Errorf("invalid lifecycle transition %s -> %s", s.phase, phase)
+	}
+	s.phase = phase
+	return nil
+}
+
+// Acquire is called by the sole Run owner. A partially acquired resource must
+// return its cleanup even alongside an error, so registration is immediate.
+func (s *Session) Acquire(ctx context.Context, name string, acquire func(context.Context) (func() error, error)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	stopped := s.stopped
+	s.mu.Unlock()
+	if stopped {
+		return context.Canceled
+	}
+	close, err := acquire(ctx)
+	if close != nil {
+		s.resources = append(s.resources, cleanup{name, close})
+	}
+	return errors.Join(err, ctx.Err())
+}
+
+func (s *Session) Run(parent context.Context, work func(context.Context, *Session) protocol.Result) protocol.Result {
+	s.mu.Lock()
+	if s.started || s.stopped {
 		s.mu.Unlock()
-		return fmt.Errorf("session already started")
+		return protocol.Result{Error: "session cannot be reused"}
 	}
 	s.started = true
-	s.mu.Unlock()
-
-	if os.Geteuid() != 0 {
-		return fmt.Errorf("soteria must run as root")
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		select {
-		case <-sigCh:
-			_ = s.Stop()
-		case <-ctx.Done():
-		}
-		signal.Stop(sigCh)
-	}()
-
-	if err := s.fs.Mount(); err != nil {
-		_ = s.Stop()
-		return fmt.Errorf("mount ephemeral filesystem: %w", err)
+	s.mu.Unlock()
+	result := work(ctx, s)
+	if err := ctx.Err(); err != nil && result.Error == "" {
+		result.Error = "session canceled; no export performed"
 	}
-
-	if err := s.fs.Populate(); err != nil {
-		_ = s.Stop()
-		return fmt.Errorf("populate ephemeral filesystem: %w", err)
-	}
-
-	if s.cfg.VPN.Enabled || s.cfg.Tor.Enabled || s.cfg.Network.KillSwitch {
-		if err := s.net.Start(); err != nil {
-			_ = s.Stop()
-			return fmt.Errorf("start network stack: %w", err)
+	cancel()
+	s.mu.Lock()
+	s.phase = Stopping
+	s.mu.Unlock()
+	var cleanupErr error
+	for i := len(s.resources) - 1; i >= 0; i-- {
+		if err := s.resources[i].close(); err != nil {
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("%s: %w", s.resources[i].name, err))
 		}
 	}
-
-	go s.mon.Run(ctx)
-
-	err := tui.Run(s.mon, func() {
-		_ = s.Stop()
-	})
-	// Ensure teardown even if TUI exits without onQuit.
-	_ = s.Stop()
-	return err
+	if cleanupErr != nil {
+		result.CleanupError = cleanupErr.Error()
+		result.Facts.Cleanup = "failed"
+	} else {
+		result.Facts.Cleanup = "completed"
+	}
+	s.mu.Lock()
+	s.result = result
+	if result.ExitCode() == 125 && (result.Error != "" || result.CleanupError != "" || !result.ChildStarted) {
+		s.phase = Failed
+	} else {
+		s.phase = Finished
+	}
+	close(s.done)
+	s.mu.Unlock()
+	return result
 }
 
-// Stop reverses startup order and is idempotent.
-func (s *Session) Stop() error {
+func (s *Session) Stop() protocol.Result {
 	s.mu.Lock()
-	if s.stopping {
+	s.stopped = true
+	if !s.started {
+		s.result = protocol.Result{Error: "session canceled before start"}
+		s.phase = Failed
 		s.mu.Unlock()
-		return nil
+		return s.result
 	}
-	s.stopping = true
 	cancel := s.cancel
+	done := s.done
 	s.mu.Unlock()
-
-	if cancel != nil {
-		cancel()
-	}
-
-	var firstErr error
-	capture := func(err error) {
-		if err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-
-	capture(s.net.Stop())
-	capture(s.fs.Teardown())
-
+	cancel()
+	<-done
 	s.mu.Lock()
-	s.started = false
-	s.mu.Unlock()
-	return firstErr
+	defer s.mu.Unlock()
+	return s.result
 }
-
-// Filesystem exposes the ephemeral FS manager (for tests).
-func (s *Session) Filesystem() *filesystem.Manager { return s.fs }
-
-// Network exposes the network stack (for tests).
-func (s *Session) Network() *network.Stack { return s.net }

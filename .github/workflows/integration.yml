@@ -1,0 +1,39 @@
+name: Opt-In Disposable VM Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: Type DISPOSABLE_VM_ONLY; this never provisions or trusts a personal host
+        required: true
+        type: string
+      target:
+        description: Preinstalled target on a fresh, externally provisioned disposable VM
+        required: true
+        type: choice
+        options: [debian13-amd64, ubuntu24.04-amd64]
+
+permissions:
+  contents: read
+
+jobs:
+  offline-smoke:
+    # Never expose a privileged self-hosted runner to PRs or caller-selected refs.
+    if: inputs.confirmation == 'DISPOSABLE_VM_ONLY' && vars.SOTERIA_VM_INTEGRATION_ENABLED == 'true' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    # Owner must configure approvals and one-job runner destruction separately.
+    environment: disposable-vm
+    runs-on: [self-hosted, linux, x64, soteria-disposable-vm, '${{ inputs.target }}']
+    timeout-minutes: 15
+    env:
+      SOTERIA_DISPOSABLE_VM: DISPOSABLE_VM_ONLY
+      SOTERIA_VM_TARGET: ${{ inputs.target }}
+      SOTERIA_VM_IMAGE_SHA256: ${{ inputs.target == 'debian13-amd64' && vars.SOTERIA_DEBIAN13_VM_IMAGE_SHA256 || vars.SOTERIA_UBUNTU24_VM_IMAGE_SHA256 }}
+      SOTERIA_EXPECTED_COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Exercise installed package, not a root build-tree binary
+        run: timeout --kill-after=5s 180s scripts/integration/offline-smoke.sh
+      # No session output, home directory, profiles, keys, or logs are uploaded.
+      # The VM owner must destroy the runner and its disks after this one job.

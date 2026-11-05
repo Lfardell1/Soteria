@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "targets": [
+    {
+      "target": "debian13-amd64",
+      "status": "pending",
+      "image": null,
+      "publisher_verification": null
+    },
+    {
+      "target": "ubuntu24.04-amd64",
+      "status": "pending",
+      "image": null,
+      "publisher_verification": null
+    }
+  ]
+}

@@ -1,245 +1,334 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
-// Config is the top-level Soteria configuration.
+const (
+	maxConfigBytes = 1 << 20
+	migrationHint  = "migrate to version 1 using config/config.example.json; replace legacy OpenVPN/Tor settings with offline mode or an administrator-provisioned WireGuard profile; legacy kill-switch toggles are not supported"
+)
+
+// Config contains caller-selected limits and networking, not runtime paths or authority.
 type Config struct {
-	Filesystem FilesystemConfig `json:"filesystem"`
-	Monitoring MonitoringConfig `json:"monitoring"`
-	VPN        VPNConfig        `json:"vpn"`
-	Tor        TorConfig        `json:"tor"`
-	DNSCrypt   DNSCryptConfig   `json:"dnscrypt"`
-	Proxychains ProxychainsConfig `json:"proxychains"`
-	Network    NetworkConfig    `json:"network"`
+	Version   int            `json:"version"`
+	Resources ResourceConfig `json:"resources"`
+	Network   NetworkConfig  `json:"network"`
+	Transfers TransferConfig `json:"transfers"`
 }
 
-type FilesystemConfig struct {
-	TmpfsSize     string   `json:"tmpfs_size"`
-	MountPoint    string   `json:"mount_point"`
-	ToolsDir      string   `json:"tools_dir"`
-	PopulatePaths []string `json:"populate_paths"`
-}
-
-type MonitoringConfig struct {
-	Processes           []string `json:"processes"`
-	TmpfsFreeSpaceMin   string   `json:"tmpfs_free_space_min"`
-	PollIntervalSeconds int      `json:"poll_interval_seconds"`
-}
-
-type VPNConfig struct {
-	Enabled    bool   `json:"enabled"`
-	ConfigFile string `json:"config_file"`
-	Interface  string `json:"interface"`
-}
-
-type TorConfig struct {
-	Enabled    bool   `json:"enabled"`
-	SocksPort  int    `json:"socks_port"`
-	ConfigFile string `json:"config_file"`
-}
-
-type DNSCryptConfig struct {
-	Enabled       bool   `json:"enabled"`
-	ConfigFile    string `json:"config_file"`
-	ListenAddress string `json:"listen_address"`
-}
-
-type ProxychainsConfig struct {
-	Enabled    bool   `json:"enabled"`
-	ConfigFile string `json:"config_file"`
+type ResourceConfig struct {
+	MemoryMax     string `json:"memory_max"`
+	WorkspaceSize string `json:"workspace_size"`
+	TasksMax      uint64 `json:"tasks_max"`
 }
 
 type NetworkConfig struct {
-	CheckConnectivity bool   `json:"check_connectivity"`
-	Gateway           string `json:"gateway"`
-	KillSwitch        bool   `json:"kill_switch"`
+	Mode    string `json:"mode"`
+	Profile string `json:"profile,omitempty"`
 }
 
-// Default returns a sensible default configuration matching the README.
+type TransferConfig struct {
+	MaxBytes string `json:"max_bytes"`
+	MaxFiles uint64 `json:"max_files"`
+}
+
+// Default returns valid, offline version 1 settings.
 func Default() Config {
 	return Config{
-		Filesystem: FilesystemConfig{
-			TmpfsSize:     "2G",
-			MountPoint:    "/mnt/secure",
-			ToolsDir:      "/usr/local/tools",
-			PopulatePaths: []string{"/bin", "/usr/bin", "/lib", "/lib64", "/usr/lib"},
+		Version: 1,
+		Resources: ResourceConfig{
+			MemoryMax:     "1G",
+			WorkspaceSize: "512M",
+			TasksMax:      256,
 		},
-		Monitoring: MonitoringConfig{
-			Processes:           []string{"openvpn", "tor"},
-			TmpfsFreeSpaceMin:   "100M",
-			PollIntervalSeconds: 2,
-		},
-		VPN: VPNConfig{
-			Enabled:    false,
-			ConfigFile: "/etc/openvpn/client.conf",
-			Interface:  "tun0",
-		},
-		Tor: TorConfig{
-			Enabled:   false,
-			SocksPort: 9050,
-		},
-		DNSCrypt: DNSCryptConfig{
-			Enabled:       false,
-			ConfigFile:    "/etc/dnscrypt-proxy/dnscrypt-proxy.toml",
-			ListenAddress: "127.0.0.1:53",
-		},
-		Proxychains: ProxychainsConfig{
-			Enabled:    false,
-			ConfigFile: "/etc/proxychains4.conf",
-		},
-		Network: NetworkConfig{
-			CheckConnectivity: true,
-			Gateway:           "1.1.1.1",
-			KillSwitch:        true,
+		Network: NetworkConfig{Mode: "offline"},
+		Transfers: TransferConfig{
+			MaxBytes: "256M",
+			MaxFiles: 10000,
 		},
 	}
 }
 
-// Load reads and validates a JSON configuration file.
-func Load(path string) (Config, error) {
-	data, err := os.ReadFile(path)
+// Parse reads at most 1 MiB of strict JSON. Version is required; other omitted
+// fields retain their defaults. No legacy configuration is translated.
+func Parse(r io.Reader) (Config, error) {
+	if r == nil {
+		return Config{}, fmt.Errorf("read config: reader is required")
+	}
+	data, err := io.ReadAll(io.LimitReader(r, maxConfigBytes+1))
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
+	if len(data) > maxConfigBytes {
+		return Config{}, fmt.Errorf("config exceeds the 1 MiB input limit")
+	}
+	if !utf8.Valid(data) {
+		return Config{}, fmt.Errorf("config must be valid UTF-8 JSON")
+	}
+
+	// encoding/json alone accepts duplicates, case-insensitive keys, and nulls.
+	// Check the exact schema before decoding the values into their Go types.
+	schema := objectSchema{
+		"version": nil,
+		"resources": {
+			"memory_max":     nil,
+			"workspace_size": nil,
+			"tasks_max":      nil,
+		},
+		"network": {
+			"mode":    nil,
+			"profile": nil,
+		},
+		"transfers": {
+			"max_bytes": nil,
+			"max_files": nil,
+		},
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := checkObject(decoder, "", schema); err != nil {
+		return Config{}, err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return Config{}, fmt.Errorf("config must contain exactly one JSON object with no trailing data")
+	}
 
 	cfg := Default()
+	cfg.Version = 0 // An omitted version must not inherit the default version.
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
-
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
 }
 
-// Validate checks required fields and feature-dependent paths.
-func (c Config) Validate() error {
-	if c.Filesystem.TmpfsSize == "" {
-		return fmt.Errorf("filesystem.tmpfs_size is required")
-	}
-	if _, err := ParseSize(c.Filesystem.TmpfsSize); err != nil {
-		return fmt.Errorf("filesystem.tmpfs_size: %w", err)
-	}
-	if c.Filesystem.MountPoint == "" {
-		return fmt.Errorf("filesystem.mount_point is required")
-	}
-	if !filepath.IsAbs(c.Filesystem.MountPoint) {
-		return fmt.Errorf("filesystem.mount_point must be absolute")
-	}
-	if _, err := ParseSize(c.Monitoring.TmpfsFreeSpaceMin); err != nil {
-		return fmt.Errorf("monitoring.tmpfs_free_space_min: %w", err)
-	}
-	if c.Monitoring.PollIntervalSeconds <= 0 {
-		return fmt.Errorf("monitoring.poll_interval_seconds must be > 0")
-	}
+type objectSchema map[string]objectSchema
 
-	if c.VPN.Enabled {
-		if c.VPN.ConfigFile == "" {
-			return fmt.Errorf("vpn.config_file is required when vpn.enabled")
-		}
-		if c.VPN.Interface == "" {
-			return fmt.Errorf("vpn.interface is required when vpn.enabled")
-		}
-		if err := requireFile(c.VPN.ConfigFile, "vpn.config_file"); err != nil {
-			return err
-		}
+func checkObject(decoder *json.Decoder, path string, schema objectSchema) error {
+	start, err := decoder.Token()
+	if err != nil {
+		return fmt.Errorf("parse config: %w", err)
 	}
-
-	if c.Tor.Enabled {
-		if c.Tor.SocksPort <= 0 || c.Tor.SocksPort > 65535 {
-			return fmt.Errorf("tor.socks_port must be a valid TCP port")
+	if start != json.Delim('{') {
+		if path == "" {
+			path = "config"
 		}
-		if c.Tor.ConfigFile != "" {
-			if err := requireFile(c.Tor.ConfigFile, "tor.config_file"); err != nil {
-				return err
+		return fmt.Errorf("%s must be a JSON object, not null or another type", path)
+	}
+	seen := make(map[string]bool, len(schema))
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return fmt.Errorf("parse config: %w", err)
+		}
+		key, ok := token.(string)
+		if !ok {
+			return fmt.Errorf("config object keys must be strings")
+		}
+		field := key
+		if path != "" {
+			field = path + "." + key
+		}
+		if seen[key] {
+			return fmt.Errorf("duplicate config field %q", field)
+		}
+		seen[key] = true
+		child, ok := schema[key]
+		if !ok {
+			switch field {
+			case "filesystem", "monitoring", "vpn", "tor", "dnscrypt", "proxychains",
+				"network.check_connectivity", "network.gateway", "network.kill_switch":
+				return fmt.Errorf("legacy config field %q is not supported; %s", field, migrationHint)
+			default:
+				return fmt.Errorf("unknown config field %q", field)
 			}
 		}
-	}
-
-	if c.DNSCrypt.Enabled {
-		if c.DNSCrypt.ConfigFile == "" {
-			return fmt.Errorf("dnscrypt.config_file is required when dnscrypt.enabled")
+		if child != nil {
+			if err := checkObject(decoder, field, child); err != nil {
+				return err
+			}
+			continue
 		}
-		if err := requireFile(c.DNSCrypt.ConfigFile, "dnscrypt.config_file"); err != nil {
-			return err
+		value, err := decoder.Token()
+		if err != nil {
+			return fmt.Errorf("parse config field %s: %w", field, err)
 		}
-	}
-
-	if c.Proxychains.Enabled {
-		if c.Proxychains.ConfigFile == "" {
-			return fmt.Errorf("proxychains.config_file is required when proxychains.enabled")
+		if value == nil {
+			return fmt.Errorf("config field %s must not be null", field)
 		}
-		if err := requireFile(c.Proxychains.ConfigFile, "proxychains.config_file"); err != nil {
-			return err
+		if _, ok := value.(json.Delim); ok {
+			return fmt.Errorf("config field %s must be a scalar value", field)
 		}
 	}
-
-	if c.Network.KillSwitch && !c.VPN.Enabled && !c.Tor.Enabled {
-		return fmt.Errorf("network.kill_switch requires vpn.enabled and/or tor.enabled")
+	if _, err := decoder.Token(); err != nil {
+		return fmt.Errorf("parse config: %w", err)
 	}
-
 	return nil
 }
 
-func requireFile(path, field string) error {
+// Load reads only the selected clean absolute regular file. It is a frontend
+// helper, not privileged configuration discovery or runtime authorization.
+func Load(path string) (Config, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || strings.IndexByte(path, 0) >= 0 {
+		return Config{}, fmt.Errorf("config path must be a clean absolute file path")
+	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return fmt.Errorf("%s: %w", field, err)
+		return Config{}, fmt.Errorf("stat config: %w", err)
 	}
-	if info.IsDir() {
-		return fmt.Errorf("%s must be a file", field)
+	if !info.Mode().IsRegular() {
+		return Config{}, fmt.Errorf("config path must name a regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("open config: %w", err)
+	}
+	defer file.Close()
+	info, err = file.Stat()
+	if err != nil {
+		return Config{}, fmt.Errorf("stat opened config: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return Config{}, fmt.Errorf("config path must name a regular file")
+	}
+	cfg, err := Parse(file)
+	if err != nil {
+		return Config{}, fmt.Errorf("load config: %w", err)
+	}
+	return cfg, nil
+}
+
+// Validate checks policy without opening files or changing runtime state.
+func (c Config) Validate() error {
+	if c.Version != 1 {
+		return fmt.Errorf("config version must be explicitly set to 1; %s", migrationHint)
+	}
+	memory, err := ParseSize(c.Resources.MemoryMax)
+	if err != nil {
+		return fmt.Errorf("resources.memory_max: %w", err)
+	}
+	if memory < 128<<20 || memory > 64<<30 {
+		return fmt.Errorf("resources.memory_max must be between 128M and 64G")
+	}
+	workspace, err := ParseSize(c.Resources.WorkspaceSize)
+	if err != nil {
+		return fmt.Errorf("resources.workspace_size: %w", err)
+	}
+	if workspace < 16<<20 || workspace > 32<<30 {
+		return fmt.Errorf("resources.workspace_size must be between 16M and 32G")
+	}
+	if workspace >= memory {
+		return fmt.Errorf("resources.workspace_size must be strictly below resources.memory_max")
+	}
+	if c.Resources.TasksMax < 32 || c.Resources.TasksMax > 4096 {
+		return fmt.Errorf("resources.tasks_max must be between 32 and 4096")
+	}
+	transfer, err := ParseSize(c.Transfers.MaxBytes)
+	if err != nil {
+		return fmt.Errorf("transfers.max_bytes: %w", err)
+	}
+	if transfer > workspace {
+		return fmt.Errorf("transfers.max_bytes must not exceed resources.workspace_size")
+	}
+	if c.Transfers.MaxFiles == 0 || c.Transfers.MaxFiles > 100000 {
+		return fmt.Errorf("transfers.max_files must be between 1 and 100000")
+	}
+	switch c.Network.Mode {
+	case "offline":
+		if c.Network.Profile != "" {
+			return fmt.Errorf("network.profile must be empty in offline mode")
+		}
+	case "wireguard":
+		if err := ValidateProfileID(c.Network.Profile); err != nil {
+			return fmt.Errorf("network.profile: %w", err)
+		}
+	default:
+		return fmt.Errorf("network.mode must be offline or wireguard")
 	}
 	return nil
 }
 
-// ParseSize converts strings like "2G", "100M", "512K", "1024" into bytes.
+// ValidateProfileID accepts 1..48 ASCII characters: lowercase alphanumeric
+// first, then lowercase alphanumeric, underscore, or hyphen. IDs are not paths.
+func ValidateProfileID(id string) error {
+	if len(id) == 0 || len(id) > 48 {
+		return fmt.Errorf("profile ID must contain between 1 and 48 characters")
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' {
+			continue
+		}
+		if i > 0 && (c == '_' || c == '-') {
+			continue
+		}
+		return fmt.Errorf("profile ID must start with lowercase alphanumeric and contain only lowercase alphanumeric, underscore, or hyphen")
+	}
+	return nil
+}
+
+// ParseSize converts a positive decimal integer with an optional B, K, M, or G
+// suffix to bytes. K/M/G are binary units; suffixes are case-insensitive.
 func ParseSize(s string) (uint64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return 0, fmt.Errorf("empty size")
+		return 0, fmt.Errorf("size must not be empty")
 	}
-
 	multiplier := uint64(1)
-	upper := strings.ToUpper(s)
-	switch {
-	case strings.HasSuffix(upper, "G"):
+	switch s[len(s)-1] {
+	case 'g', 'G':
 		multiplier = 1 << 30
 		s = s[:len(s)-1]
-	case strings.HasSuffix(upper, "M"):
+	case 'm', 'M':
 		multiplier = 1 << 20
 		s = s[:len(s)-1]
-	case strings.HasSuffix(upper, "K"):
+	case 'k', 'K':
 		multiplier = 1 << 10
 		s = s[:len(s)-1]
-	case strings.HasSuffix(upper, "B"):
+	case 'b', 'B':
 		s = s[:len(s)-1]
 	}
-
-	n, err := strconv.ParseUint(strings.TrimSpace(s), 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid size %q", s)
+	if s == "" {
+		return 0, fmt.Errorf("size requires a positive decimal integer")
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return 0, fmt.Errorf("size must be a positive decimal integer with an optional B, K, M, or G suffix")
+		}
+	}
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil || n > ^uint64(0)/multiplier {
+		return 0, fmt.Errorf("size exceeds uint64 bytes")
+	}
+	if n == 0 {
+		return 0, fmt.Errorf("size must be greater than zero")
 	}
 	return n * multiplier, nil
 }
 
-// FormatSize renders a human-readable size string.
-func FormatSize(bytes uint64) string {
-	switch {
-	case bytes >= 1<<30:
-		return fmt.Sprintf("%.1fG", float64(bytes)/float64(1<<30))
-	case bytes >= 1<<20:
-		return fmt.Sprintf("%.1fM", float64(bytes)/float64(1<<20))
-	case bytes >= 1<<10:
-		return fmt.Sprintf("%.1fK", float64(bytes)/float64(1<<10))
-	default:
-		return fmt.Sprintf("%dB", bytes)
+// FormatSize renders an exact size without floating-point rounding. It uses the
+// largest K/M/G unit that divides the value exactly, or bytes otherwise.
+func FormatSize(n uint64) string {
+	if n != 0 {
+		for _, unit := range []struct {
+			bytes  uint64
+			suffix string
+		}{{1 << 30, "G"}, {1 << 20, "M"}, {1 << 10, "K"}} {
+			if n%unit.bytes == 0 {
+				return strconv.FormatUint(n/unit.bytes, 10) + unit.suffix
+			}
+		}
 	}
+	return strconv.FormatUint(n, 10) + "B"
 }
